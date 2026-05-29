@@ -1,30 +1,32 @@
 /*
 ============================================================================
-AIR MOUSE PRO V5
-REAL DIAGONAL MOVEMENT + STABLE + PRECISE + GOOD BUTTONS
+AIR MOUSE PRO V7 HYBRID
+GYRO PRECISION + TILT ASSIST + REAL CORNER REACH
 ============================================================================
 
-FIXES OVER PREVIOUS VERSION:
-✓ TRUE diagonal movement
-✓ No robotic 4-direction feel
-✓ Natural floating cursor
-✓ Tiny movements possible
-✓ Smooth Android TV control
-✓ Better UX
-✓ Stable when still
-✓ Fast when moving
-✓ Proper button logic
-✓ No crazy random cursor jumps
-✓ Real sub-pixel accumulation
+THIS VERSION FIXES:
+
+✓ Real diagonal movement
+✓ Easy corner reaching
+✓ Tiny icon precision
+✓ Smooth floating cursor
+✓ Stable idle
+✓ Continuous movement when tilted
+✓ Fast traversal across screen
+✓ Gyro precision retained
 ✓ Commercial air mouse feel
+✓ Android + PC usability improved
 
-IMPORTANT:
-This uses GYROSCOPE as MAIN control.
-NOT accelerometer tilt.
+ARCHITECTURE:
 
-WHY?
-Tilt-based systems feel robotic.
-Gyro-based systems feel natural.
+SMALL MOVEMENTS:
+  Gyroscope controls cursor precisely
+
+LARGE TILT:
+  Accelerometer adds continuous directional force
+
+RESULT:
+  Precision + easy traversal together
 
 BOARD:
 ESP32-C3 Super Mini
@@ -34,14 +36,8 @@ SDA -> GPIO6
 SCL -> GPIO7
 
 BUTTONS:
-LEFT  -> GPIO4 -> GND
-RIGHT -> GPIO5 -> GND
-
-ESP32 BOARD SETTINGS:
-Board: ESP32C3 Dev Module
-USB CDC On Boot: ENABLED
-Partition: Huge APP
-Upload Speed: 921600
+GPIO4 -> LEFT CLICK
+GPIO5 -> RIGHT CLICK
 
 ============================================================================
 */
@@ -69,57 +65,88 @@ Upload Speed: 921600
 BleMouse bleMouse("AirMouse-C3", "ESP32", 100);
 
 // ============================================================================
-// TUNING
+// HYBRID TUNING
 // ============================================================================
 
+// ----------------------------
+// GYRO CONTROL
+// ----------------------------
+
 // LOWER = FASTER
-float gyroScale = 22.0;
+float gyroScale = 24.0;
 
-// smoothing
-float alphaStill = 0.92;
-float alphaMove  = 0.30;
+// ----------------------------
+// TILT ASSIST
+// IMPORTANT PART
+// ----------------------------
 
-// deadzone
-float deadzone = 0.10;
+// Strength of continuous movement
+float tiltAssist = 2.4;
 
-// motion threshold
-float stillThreshold = 2.0;
+// Nonlinear curve
+float tiltCurve = 1.8;
 
-// damping
-float damping = 0.90;
+// Minimum tilt before assist starts
+float tiltDeadzone = 0.12;
 
-// max speed
-int maxSpeed = 50;
+// ----------------------------
+// STABILITY
+// ----------------------------
 
-// tiny movement boost
-float microBoost = 1.35;
+float alphaStill = 0.96;
+float alphaMove  = 0.22;
 
-// gyro drift correction
-float gyroDriftX = 0;
-float gyroDriftY = 0;
+float damping = 0.86;
+
+float deadzone = 0.08;
+
+float stillThreshold = 1.5;
+
+// ----------------------------
+// MICRO MOVEMENTS
+// ----------------------------
+
+float microBoost = 1.15;
+
+// ----------------------------
+// DYNAMIC ACCELERATION
+// ----------------------------
+
+float accelMultiplier = 0.22;
+float accelExponent   = 1.35;
+
+// ----------------------------
+// CURSOR LIMIT
+// ----------------------------
+
+int maxSpeed = 90;
+
+// ----------------------------
+// RESIDUAL CLEANUP
+// ----------------------------
+
+float residualDecay = 0.90;
 
 // ============================================================================
 // VARIABLES
 // ============================================================================
 
-float velX = 0;
-float velY = 0;
+float gyroOffsetX = 0;
+float gyroOffsetY = 0;
+
+float accelOffsetX = 0;
+float accelOffsetY = 0;
 
 float smoothX = 0;
 float smoothY = 0;
 
-// residual accumulation
 float accumX = 0;
 float accumY = 0;
 
-// gyro offsets
-float gyroOffsetX = 0;
-float gyroOffsetY = 0;
-
-bool prevLeft = HIGH;
+bool prevLeft  = HIGH;
 bool prevRight = HIGH;
 
-unsigned long lastLeftClick = 0;
+unsigned long lastLeftClick  = 0;
 unsigned long lastRightClick = 0;
 
 // ============================================================================
@@ -139,25 +166,25 @@ void initMPU() {
     }
   }
 
-  // wake
+  // Wake MPU
   Wire.beginTransmission(MPU_ADDR);
   Wire.write(0x6B);
   Wire.write(0x00);
   Wire.endTransmission(true);
 
-  // gyro ±250 deg/s
+  // Gyro ±250 deg/s
   Wire.beginTransmission(MPU_ADDR);
   Wire.write(0x1B);
   Wire.write(0x00);
   Wire.endTransmission(true);
 
-  // accel ±2g
+  // Accel ±2g
   Wire.beginTransmission(MPU_ADDR);
   Wire.write(0x1C);
   Wire.write(0x00);
   Wire.endTransmission(true);
 
-  // LOW PASS FILTER
+  // DLPF
   Wire.beginTransmission(MPU_ADDR);
   Wire.write(0x1A);
   Wire.write(0x04);
@@ -208,7 +235,10 @@ void calibrateMPU() {
   long sumGX = 0;
   long sumGY = 0;
 
-  for (int i = 0; i < 500; i++) {
+  long sumAX = 0;
+  long sumAY = 0;
+
+  for (int i = 0; i < 1000; i++) {
 
     int16_t ax, ay, az;
     int16_t gx, gy, gz;
@@ -218,19 +248,43 @@ void calibrateMPU() {
     sumGX += gx;
     sumGY += gy;
 
-    delay(3);
+    sumAX += ax;
+    sumAY += ay;
+
+    delay(2);
   }
 
-  gyroOffsetX = sumGX / 500.0;
-  gyroOffsetY = sumGY / 500.0;
+  gyroOffsetX = sumGX / 1000.0;
+  gyroOffsetY = sumGY / 1000.0;
+
+  accelOffsetX = sumAX / 1000.0;
+  accelOffsetY = sumAY / 1000.0;
 
   Serial.println("CALIBRATION DONE");
 
-  Serial.print("OFFSET X: ");
+  Serial.print("GX OFFSET: ");
   Serial.println(gyroOffsetX);
 
-  Serial.print("OFFSET Y: ");
+  Serial.print("GY OFFSET: ");
   Serial.println(gyroOffsetY);
+}
+
+// ============================================================================
+// CURVE FUNCTION
+// ============================================================================
+
+float curvedTilt(float value) {
+
+  float sign = (value >= 0) ? 1.0 : -1.0;
+
+  value = fabs(value);
+
+  if (value < tiltDeadzone)
+    return 0;
+
+  value -= tiltDeadzone;
+
+  return sign * pow(value, tiltCurve);
 }
 
 // ============================================================================
@@ -243,14 +297,13 @@ void setup() {
 
   delay(1500);
 
-  Serial.println("\nAIR MOUSE PRO V5");
+  Serial.println("\nAIR MOUSE PRO V7 HYBRID");
 
   pinMode(BTN_LEFT, INPUT_PULLUP);
   pinMode(BTN_RIGHT, INPUT_PULLUP);
 
   Wire.begin(SDA_PIN, SCL_PIN);
 
-  // FAST I2C
   Wire.setClock(400000);
 
   initMPU();
@@ -259,7 +312,7 @@ void setup() {
 
   bleMouse.begin();
 
-  Serial.println("BLE STARTED");
+  Serial.println("BLE READY");
   Serial.println("SEARCH: AirMouse-C3");
 }
 
@@ -277,27 +330,75 @@ void loop() {
     readMPU(ax, ay, az, gx, gy, gz);
 
     // ============================================================
-    // GYRO ONLY
+    // GYRO
     // ============================================================
 
-    float gyroX = (gx - gyroOffsetX) / 131.0;
-    float gyroY = (gy - gyroOffsetY) / 131.0;
+    float gyroX =
+      (gx - gyroOffsetX) / 131.0;
+
+    float gyroY =
+      (gy - gyroOffsetY) / 131.0;
 
     // ============================================================
-    // TRUE DIAGONAL VELOCITY
+    // ACCEL
+    // ============================================================
+
+    float accelX =
+      (ax - accelOffsetX) / 16384.0;
+
+    float accelY =
+      (ay - accelOffsetY) / 16384.0;
+
+    // ============================================================
+    // GYRO MOVEMENT
     // ============================================================
 
     float rawX = gyroY / gyroScale;
     float rawY = -gyroX / gyroScale;
 
     // ============================================================
-    // MOTION MAGNITUDE
+    // TILT ASSIST
+    // CONTINUOUS MOVEMENT TOWARD CORNERS
     // ============================================================
 
-    float motion = sqrt(
-      (rawX * rawX) +
-      (rawY * rawY)
-    );
+    float tiltX =
+      curvedTilt(accelY) * tiltAssist;
+
+    float tiltY =
+      curvedTilt(accelX) * tiltAssist;
+
+    rawX += tiltX;
+    rawY += tiltY;
+
+    // ============================================================
+    // MAGNITUDE
+    // ============================================================
+
+    float magnitude =
+      sqrt((rawX * rawX) +
+           (rawY * rawY));
+
+    // ============================================================
+    // DEADZONE
+    // ============================================================
+
+    if (fabs(rawX) < deadzone)
+      rawX = 0;
+
+    if (fabs(rawY) < deadzone)
+      rawY = 0;
+
+    // ============================================================
+    // DYNAMIC ACCELERATION
+    // ============================================================
+
+    float accel =
+      1.0 +
+      pow(magnitude * accelMultiplier,
+          accelExponent);
+
+    rawX *= accel;
+    rawY *= accel;
 
     // ============================================================
     // ADAPTIVE SMOOTHING
@@ -305,7 +406,7 @@ void loop() {
 
     float alpha;
 
-    if (motion < stillThreshold) {
+    if (magnitude < stillThreshold) {
       alpha = alphaStill;
     } else {
       alpha = alphaMove;
@@ -327,27 +428,42 @@ void loop() {
     smoothY *= damping;
 
     // ============================================================
-    // MICRO MOVEMENT BOOST
+    // MICRO BOOST
     // ============================================================
 
-    if (fabs(smoothX) < 0.5 && smoothX != 0) {
+    if (fabs(smoothX) < 0.35 &&
+        smoothX != 0) {
+
       smoothX *= microBoost;
     }
 
-    if (fabs(smoothY) < 0.5 && smoothY != 0) {
+    if (fabs(smoothY) < 0.35 &&
+        smoothY != 0) {
+
       smoothY *= microBoost;
     }
 
     // ============================================================
-    // DEADZONE
+    // IDLE LOCK
     // ============================================================
 
-    if (fabs(smoothX) < deadzone) smoothX = 0;
-    if (fabs(smoothY) < deadzone) smoothY = 0;
+    if (magnitude < 0.25) {
+
+      smoothX = 0;
+      smoothY = 0;
+
+      accumX *= residualDecay;
+      accumY *= residualDecay;
+
+      if (fabs(accumX) < 0.05)
+        accumX = 0;
+
+      if (fabs(accumY) < 0.05)
+        accumY = 0;
+    }
 
     // ============================================================
     // SUB-PIXEL ACCUMULATION
-    // THIS IS WHAT MAKES SMALL MOVEMENTS POSSIBLE
     // ============================================================
 
     accumX += smoothX;
@@ -373,38 +489,16 @@ void loop() {
     if (moveX != 0 || moveY != 0) {
 
       bleMouse.move(moveX, moveY);
-
-      static unsigned long lastPrint = 0;
-
-      if (millis() - lastPrint > 100) {
-
-        Serial.print("X:");
-        Serial.print(moveX);
-
-        Serial.print(" Y:");
-        Serial.print(moveY);
-
-        Serial.print(" SX:");
-        Serial.print(smoothX, 2);
-
-        Serial.print(" SY:");
-        Serial.println(smoothY, 2);
-
-        lastPrint = millis();
-      }
     }
 
     // ============================================================
     // BUTTONS
     // ============================================================
 
-    bool leftNow = digitalRead(BTN_LEFT);
+    bool leftNow  = digitalRead(BTN_LEFT);
     bool rightNow = digitalRead(BTN_RIGHT);
 
-    // ============================================================
     // LEFT CLICK
-    // ============================================================
-
     if (prevLeft == HIGH && leftNow == LOW) {
 
       if (millis() - lastLeftClick > 80) {
@@ -417,10 +511,7 @@ void loop() {
       }
     }
 
-    // ============================================================
     // RIGHT CLICK
-    // ============================================================
-
     if (prevRight == HIGH && rightNow == LOW) {
 
       if (millis() - lastRightClick > 80) {
@@ -433,8 +524,34 @@ void loop() {
       }
     }
 
-    prevLeft = leftNow;
+    prevLeft  = leftNow;
     prevRight = rightNow;
+
+    // ============================================================
+    // DEBUG
+    // ============================================================
+
+    static unsigned long lastPrint = 0;
+
+    if (millis() - lastPrint > 150) {
+
+      Serial.print("X:");
+      Serial.print(moveX);
+
+      Serial.print(" Y:");
+      Serial.print(moveY);
+
+      Serial.print(" MAG:");
+      Serial.print(magnitude, 2);
+
+      Serial.print(" TILT X:");
+      Serial.print(tiltX, 2);
+
+      Serial.print(" TILT Y:");
+      Serial.println(tiltY, 2);
+
+      lastPrint = millis();
+    }
   }
 
   delay(2);
@@ -442,54 +559,32 @@ void loop() {
 
 /*
 ============================================================================
-BEST SETTINGS
+BEST TUNING
 ============================================================================
 
-MORE STABLE:
-alphaStill = 0.95
-
-LESS LAG:
-alphaMove = 0.22
-
-FASTER:
-gyroScale = 18
+FASTER OVERALL:
+gyroScale = 20
 
 SLOWER:
-gyroScale = 28
+gyroScale = 30
 
-BETTER SMALL TARGETING:
-microBoost = 1.5
+MORE CORNER PULL:
+tiltAssist = 3.2
 
-LESS JITTER:
-deadzone = 0.15
+LESS CORNER PULL:
+tiltAssist = 1.6
 
-MORE FLOATY:
-damping = 0.94
+MORE PRECISE:
+tiltCurve = 2.2
 
-MORE SHARP:
-damping = 0.86
+MORE RESPONSIVE:
+tiltCurve = 1.4
 
-============================================================================
-WHY THIS FEELS BETTER
-============================================================================
+MORE STABLE:
+alphaStill = 0.97
 
-OLD SYSTEM:
-Tilt angle -> cursor
-
-PROBLEM:
-Cursor only likes cardinal directions
-Feels robotic
-Tiny movement impossible
-
-NEW SYSTEM:
-Angular velocity -> accumulated movement
-
-RESULT:
-Natural diagonals
-Floating feel
-Tiny targeting possible
-Commercial UX
-No stair-stepping
+LESS LAG:
+alphaMove = 0.18
 
 ============================================================================
 */
