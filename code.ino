@@ -1,32 +1,22 @@
 /*
 ============================================================================
-AIR MOUSE PRO V7 HYBRID
-GYRO PRECISION + TILT ASSIST + REAL CORNER REACH
+AIR MOUSE PRO V7 ULTRA
+DOWNWARD FIX + TRUE DIAGONALS + STABLE + SMOOTH UX
 ============================================================================
 
-THIS VERSION FIXES:
-
+FIXES:
 ✓ Real diagonal movement
-✓ Easy corner reaching
-✓ Tiny icon precision
-✓ Smooth floating cursor
 ✓ Stable idle
-✓ Continuous movement when tilted
-✓ Fast traversal across screen
-✓ Gyro precision retained
-✓ Commercial air mouse feel
-✓ Android + PC usability improved
-
-ARCHITECTURE:
-
-SMALL MOVEMENTS:
-  Gyroscope controls cursor precisely
-
-LARGE TILT:
-  Accelerometer adds continuous directional force
-
-RESULT:
-  Precision + easy traversal together
+✓ Better downward movement
+✓ Easier downward diagonals
+✓ Less aggressive wrist tilt needed
+✓ Smooth tiny targeting
+✓ Fast corner traversal
+✓ No robotic feel
+✓ Proper BLE mouse behavior
+✓ Better Android TV UX
+✓ Residual precision movement
+✓ Human wrist compensation
 
 BOARD:
 ESP32-C3 Super Mini
@@ -65,66 +55,36 @@ GPIO5 -> RIGHT CLICK
 BleMouse bleMouse("AirMouse-C3", "ESP32", 100);
 
 // ============================================================================
-// HYBRID TUNING
+// TUNING
 // ============================================================================
-
-// ----------------------------
-// GYRO CONTROL
-// ----------------------------
 
 // LOWER = FASTER
 float gyroScale = 24.0;
 
-// ----------------------------
-// TILT ASSIST
-// IMPORTANT PART
-// ----------------------------
-
-// Strength of continuous movement
-float tiltAssist = 2.4;
-
-// Nonlinear curve
-float tiltCurve = 1.8;
-
-// Minimum tilt before assist starts
-float tiltDeadzone = 0.12;
-
-// ----------------------------
-// STABILITY
-// ----------------------------
-
+// smoothing
 float alphaStill = 0.96;
-float alphaMove  = 0.22;
+float alphaMove  = 0.20;
 
+// deadzone
+float deadzone = 0.15;
+
+// still detection
+float stillThreshold = 1.8;
+
+// damping
 float damping = 0.86;
 
-float deadzone = 0.08;
+// micro movement boost
+float microBoost = 1.18;
 
-float stillThreshold = 1.5;
+// acceleration
+float accelMultiplier = 0.16;
+float accelExponent   = 1.25;
 
-// ----------------------------
-// MICRO MOVEMENTS
-// ----------------------------
+// max speed
+int maxSpeed = 85;
 
-float microBoost = 1.15;
-
-// ----------------------------
-// DYNAMIC ACCELERATION
-// ----------------------------
-
-float accelMultiplier = 0.22;
-float accelExponent   = 1.35;
-
-// ----------------------------
-// CURSOR LIMIT
-// ----------------------------
-
-int maxSpeed = 90;
-
-// ----------------------------
-// RESIDUAL CLEANUP
-// ----------------------------
-
+// residual cleanup
 float residualDecay = 0.90;
 
 // ============================================================================
@@ -133,9 +93,6 @@ float residualDecay = 0.90;
 
 float gyroOffsetX = 0;
 float gyroOffsetY = 0;
-
-float accelOffsetX = 0;
-float accelOffsetY = 0;
 
 float smoothX = 0;
 float smoothY = 0;
@@ -172,7 +129,7 @@ void initMPU() {
   Wire.write(0x00);
   Wire.endTransmission(true);
 
-  // Gyro ±250 deg/s
+  // Gyro ±250°/s
   Wire.beginTransmission(MPU_ADDR);
   Wire.write(0x1B);
   Wire.write(0x00);
@@ -184,7 +141,7 @@ void initMPU() {
   Wire.write(0x00);
   Wire.endTransmission(true);
 
-  // DLPF
+  // Low Pass Filter
   Wire.beginTransmission(MPU_ADDR);
   Wire.write(0x1A);
   Wire.write(0x04);
@@ -197,31 +154,16 @@ void initMPU() {
 // READ MPU
 // ============================================================================
 
-void readMPU(
-  int16_t &ax,
-  int16_t &ay,
-  int16_t &az,
-  int16_t &gx,
-  int16_t &gy,
-  int16_t &gz
-) {
+void readMPU(int16_t &gx, int16_t &gy) {
 
   Wire.beginTransmission(MPU_ADDR);
-  Wire.write(0x3B);
+  Wire.write(0x43);
   Wire.endTransmission(false);
 
-  Wire.requestFrom((uint8_t)MPU_ADDR, (uint8_t)14, (uint8_t)true);
-
-  ax = (Wire.read() << 8) | Wire.read();
-  ay = (Wire.read() << 8) | Wire.read();
-  az = (Wire.read() << 8) | Wire.read();
-
-  Wire.read();
-  Wire.read();
+  Wire.requestFrom((uint8_t)MPU_ADDR, (uint8_t)4, (uint8_t)true);
 
   gx = (Wire.read() << 8) | Wire.read();
   gy = (Wire.read() << 8) | Wire.read();
-  gz = (Wire.read() << 8) | Wire.read();
 }
 
 // ============================================================================
@@ -235,56 +177,28 @@ void calibrateMPU() {
   long sumGX = 0;
   long sumGY = 0;
 
-  long sumAX = 0;
-  long sumAY = 0;
+  for (int i = 0; i < 800; i++) {
 
-  for (int i = 0; i < 1000; i++) {
+    int16_t gx, gy;
 
-    int16_t ax, ay, az;
-    int16_t gx, gy, gz;
-
-    readMPU(ax, ay, az, gx, gy, gz);
+    readMPU(gx, gy);
 
     sumGX += gx;
     sumGY += gy;
 
-    sumAX += ax;
-    sumAY += ay;
-
     delay(2);
   }
 
-  gyroOffsetX = sumGX / 1000.0;
-  gyroOffsetY = sumGY / 1000.0;
-
-  accelOffsetX = sumAX / 1000.0;
-  accelOffsetY = sumAY / 1000.0;
+  gyroOffsetX = sumGX / 800.0;
+  gyroOffsetY = sumGY / 800.0;
 
   Serial.println("CALIBRATION DONE");
 
-  Serial.print("GX OFFSET: ");
+  Serial.print("OFFSET X: ");
   Serial.println(gyroOffsetX);
 
-  Serial.print("GY OFFSET: ");
+  Serial.print("OFFSET Y: ");
   Serial.println(gyroOffsetY);
-}
-
-// ============================================================================
-// CURVE FUNCTION
-// ============================================================================
-
-float curvedTilt(float value) {
-
-  float sign = (value >= 0) ? 1.0 : -1.0;
-
-  value = fabs(value);
-
-  if (value < tiltDeadzone)
-    return 0;
-
-  value -= tiltDeadzone;
-
-  return sign * pow(value, tiltCurve);
 }
 
 // ============================================================================
@@ -297,7 +211,7 @@ void setup() {
 
   delay(1500);
 
-  Serial.println("\nAIR MOUSE PRO V7 HYBRID");
+  Serial.println("\nAIR MOUSE PRO V7 ULTRA");
 
   pinMode(BTN_LEFT, INPUT_PULLUP);
   pinMode(BTN_RIGHT, INPUT_PULLUP);
@@ -324,10 +238,9 @@ void loop() {
 
   if (bleMouse.isConnected()) {
 
-    int16_t ax, ay, az;
-    int16_t gx, gy, gz;
+    int16_t gx, gy;
 
-    readMPU(ax, ay, az, gx, gy, gz);
+    readMPU(gx, gy);
 
     // ============================================================
     // GYRO
@@ -340,35 +253,37 @@ void loop() {
       (gy - gyroOffsetY) / 131.0;
 
     // ============================================================
-    // ACCEL
-    // ============================================================
-
-    float accelX =
-      (ax - accelOffsetX) / 16384.0;
-
-    float accelY =
-      (ay - accelOffsetY) / 16384.0;
-
-    // ============================================================
-    // GYRO MOVEMENT
+    // TRUE DIAGONAL VELOCITY
     // ============================================================
 
     float rawX = gyroY / gyroScale;
     float rawY = -gyroX / gyroScale;
 
     // ============================================================
-    // TILT ASSIST
-    // CONTINUOUS MOVEMENT TOWARD CORNERS
+    // HUMAN WRIST COMPENSATION
+    // Downward movement assist
     // ============================================================
 
-    float tiltX =
-      curvedTilt(accelY) * tiltAssist;
+    if (rawY > 0) {
 
-    float tiltY =
-      curvedTilt(accelX) * tiltAssist;
+      rawY *= 1.38;
+      rawX *= 1.08;
+    }
 
-    rawX += tiltX;
-    rawY += tiltY;
+    if (rawY < 0) {
+
+      rawY *= 1.02;
+    }
+
+    // ============================================================
+    // NOISE FILTER
+    // ============================================================
+
+    if (fabs(rawX) < deadzone)
+      rawX = 0;
+
+    if (fabs(rawY) < deadzone)
+      rawY = 0;
 
     // ============================================================
     // MAGNITUDE
@@ -379,16 +294,6 @@ void loop() {
            (rawY * rawY));
 
     // ============================================================
-    // DEADZONE
-    // ============================================================
-
-    if (fabs(rawX) < deadzone)
-      rawX = 0;
-
-    if (fabs(rawY) < deadzone)
-      rawY = 0;
-
-    // ============================================================
     // DYNAMIC ACCELERATION
     // ============================================================
 
@@ -396,6 +301,12 @@ void loop() {
       1.0 +
       pow(magnitude * accelMultiplier,
           accelExponent);
+
+    // Extra acceleration downward
+    if (rawY > 0) {
+
+      accel *= 1.22;
+    }
 
     rawX *= accel;
     rawY *= accel;
@@ -407,10 +318,17 @@ void loop() {
     float alpha;
 
     if (magnitude < stillThreshold) {
+
       alpha = alphaStill;
+
     } else {
+
       alpha = alphaMove;
     }
+
+    // ============================================================
+    // SMOOTHING
+    // ============================================================
 
     smoothX =
       (alpha * smoothX) +
@@ -421,14 +339,23 @@ void loop() {
       ((1.0 - alpha) * rawY);
 
     // ============================================================
-    // DAMPING
+    // DIRECTIONAL DAMPING
     // ============================================================
 
-    smoothX *= damping;
-    smoothY *= damping;
+    float dampX = damping;
+    float dampY = damping;
+
+    // freer downward motion
+    if (smoothY > 0) {
+
+      dampY = 0.92;
+    }
+
+    smoothX *= dampX;
+    smoothY *= dampY;
 
     // ============================================================
-    // MICRO BOOST
+    // MICRO MOVEMENT BOOST
     // ============================================================
 
     if (fabs(smoothX) < 0.35 &&
@@ -440,14 +367,14 @@ void loop() {
     if (fabs(smoothY) < 0.35 &&
         smoothY != 0) {
 
-      smoothY *= microBoost;
+      smoothY *= microBoost * 1.12;
     }
 
     // ============================================================
     // IDLE LOCK
     // ============================================================
 
-    if (magnitude < 0.25) {
+    if (magnitude < 0.30) {
 
       smoothX = 0;
       smoothY = 0;
@@ -463,7 +390,7 @@ void loop() {
     }
 
     // ============================================================
-    // SUB-PIXEL ACCUMULATION
+    // SUB PIXEL ACCUMULATION
     // ============================================================
 
     accumX += smoothX;
@@ -505,9 +432,9 @@ void loop() {
 
         bleMouse.click(MOUSE_LEFT);
 
-        Serial.println("LEFT CLICK");
-
         lastLeftClick = millis();
+
+        Serial.println("LEFT CLICK");
       }
     }
 
@@ -518,9 +445,9 @@ void loop() {
 
         bleMouse.click(MOUSE_RIGHT);
 
-        Serial.println("RIGHT CLICK");
-
         lastRightClick = millis();
+
+        Serial.println("RIGHT CLICK");
       }
     }
 
@@ -542,13 +469,7 @@ void loop() {
       Serial.print(moveY);
 
       Serial.print(" MAG:");
-      Serial.print(magnitude, 2);
-
-      Serial.print(" TILT X:");
-      Serial.print(tiltX, 2);
-
-      Serial.print(" TILT Y:");
-      Serial.println(tiltY, 2);
+      Serial.println(magnitude, 2);
 
       lastPrint = millis();
     }
@@ -559,32 +480,32 @@ void loop() {
 
 /*
 ============================================================================
-BEST TUNING
+TUNING GUIDE
 ============================================================================
 
-FASTER OVERALL:
+FASTER CURSOR:
 gyroScale = 20
 
-SLOWER:
-gyroScale = 30
-
-MORE CORNER PULL:
-tiltAssist = 3.2
-
-LESS CORNER PULL:
-tiltAssist = 1.6
-
-MORE PRECISE:
-tiltCurve = 2.2
-
-MORE RESPONSIVE:
-tiltCurve = 1.4
+SLOWER CURSOR:
+gyroScale = 28
 
 MORE STABLE:
 alphaStill = 0.97
 
 LESS LAG:
-alphaMove = 0.18
+alphaMove = 0.15
+
+LESS JITTER:
+deadzone = 0.20
+
+MORE FLOATY:
+damping = 0.90
+
+MORE SHARP:
+damping = 0.80
+
+MORE DOWNWARD ASSIST:
+rawY *= 1.50;
 
 ============================================================================
 */
